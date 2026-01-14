@@ -1,0 +1,11 @@
+# Datasets
+Datasets/Activations/
+*.pt
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Test outputs
+test_sharding_output/
+test_integrity_output/
