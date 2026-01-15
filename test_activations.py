@@ -8,6 +8,7 @@ Includes rigorous data integrity checks.
 import shutil
 import torch
 import glob
+import json
 import os
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -15,6 +16,61 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from activation_utils import ResidualStreamHook, ShardedActivationBuffer, extract_and_save
 
 TEST_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
+def test_metadata_file():
+    """Test that metadata.json is created and contains correct info."""
+    print("\n" + "=" * 60)
+    print("TEST: Metadata JSON Creation")
+    print("=" * 60)
+    
+    output_dir = Path("test_metadata_output")
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+        
+    print(f"Loading {TEST_MODEL}...")
+    try:
+        model = AutoModelForCausalLM.from_pretrained(TEST_MODEL, device_map="cpu", torch_dtype=torch.float32)
+        tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL)
+    except Exception as e:
+        print(f"⚠️ Could not load model: {e}")
+        return
+
+    prompt = "Test metadata."
+    response = "Okay."
+    
+    # Metadata to pass
+    meta = {"custom_field": "test_value"}
+    
+    extract_and_save(
+        model=model,
+        tokenizer=tokenizer,
+        prompts=[prompt],
+        responses=[response],
+        output_root=output_dir,
+        batch_size=1,
+        shard_size=10,
+        metadata=meta
+    )
+    
+    meta_path = output_dir / "metadata.json"
+    if not meta_path.exists():
+        print("❌ metadata.json not found!")
+        return
+        
+    with open(meta_path, "r") as f:
+        data = json.load(f)
+        
+    print(f"Metadata content: {data}")
+    
+    # Verify fields
+    assert data.get("custom_field") == "test_value"
+    assert data.get("total_examples") == 1
+    assert "hidden_dim" in data
+    assert "num_layers" in data
+    
+    print("✅ Metadata file verified.")
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
 
 def test_sharding_mechanism():
     """Test the low-level sharding buffer logic with dummy tensors."""
@@ -156,6 +212,7 @@ def test_end_to_end_integrity():
 
 def main():
     test_sharding_mechanism()
+    test_metadata_file()
     test_end_to_end_integrity()
 
 if __name__ == "__main__":

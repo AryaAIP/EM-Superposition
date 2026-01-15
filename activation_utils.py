@@ -9,6 +9,7 @@ Features:
 
 import os
 import gc
+import json
 import shutil
 import torch
 from pathlib import Path
@@ -66,6 +67,10 @@ class ResidualStreamHook:
     def get_activations(self) -> Dict[int, torch.Tensor]:
         """Returns the dictionary of captured activations."""
         return self.activations
+
+    def clear(self):
+        """Explicitly clears the captured activations."""
+        self.activations.clear()
 
 
 class ShardedActivationBuffer:
@@ -167,9 +172,11 @@ def extract_and_save(
     output_root: Union[str, Path],
     batch_size: int = 4,
     shard_size: int = 512,
+    metadata: Optional[Dict] = None,
 ) -> int:
     """
     Runs the pipeline: tokenizes pairs, runs model, captures activations, saves shards.
+    Also saves a metadata.json file if metadata dict is provided.
     
     Args:
         model: Loaded model.
@@ -179,6 +186,7 @@ def extract_and_save(
         output_root: Directory to save layers/shards.
         batch_size: Inference batch size.
         shard_size: Saving shard size.
+        metadata: Optional dictionary of metadata to save.
         
     Returns:
         Total number of examples processed.
@@ -198,6 +206,10 @@ def extract_and_save(
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+            
+    # Runtime stats for metadata
+    detected_hidden_dim = None
+    detected_num_layers = None
     
     try:
         for i in range(0, total, batch_size):
@@ -219,8 +231,17 @@ def extract_and_save(
             # Get activations from hook
             layer_acts = hook.get_activations()
             
+            # Capture metadata from first batch
+            if detected_hidden_dim is None and layer_acts:
+                first_layer_idx = next(iter(layer_acts))
+                detected_hidden_dim = layer_acts[first_layer_idx].shape[-1]
+                detected_num_layers = len(layer_acts)
+            
             # Add to buffer
             buffer.add(layer_acts)
+            
+            # Explicitly clear hook storage to free GPU memory immediately
+            hook.clear()
             
             # Cleanup for this batch
             del inputs
@@ -231,4 +252,22 @@ def extract_and_save(
         # Flush any remaining data
         buffer.flush()
         
+        # Save Metadata
+        if metadata:
+            meta_save = metadata.copy()
+            meta_save.update({
+                "total_examples": total,
+                "shard_size": shard_size,
+                "batch_size": batch_size,
+                "hidden_dim": detected_hidden_dim,
+                "num_layers": detected_num_layers
+            })
+            
+            meta_path = Path(output_root) / "metadata.json"
+            # Ensure directory exists (it might not if total=0, though buffer init handles it)
+            Path(output_root).mkdir(parents=True, exist_ok=True)
+            
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_save, f, indent=2)
+
     return total

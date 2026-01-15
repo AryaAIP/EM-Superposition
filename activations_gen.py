@@ -7,6 +7,7 @@ Iterates over models and SP datasets, extracting activations for both EM and Neu
 
 import os
 import json
+import gc
 import torch
 from pathlib import Path
 from typing import List, Tuple
@@ -16,16 +17,51 @@ from activation_utils import extract_and_save
 from test import setup  # Reuse the setup function from test.py
 
 # Configuration
+DEFAULT_BATCH_SIZE = 4
+DEFAULT_SHARD_SIZE = 512
+
+# List of models with optional per-model overrides
 MODELS = [
-    # "unsloth/Qwen3-1.7B", # User requested this, but it might not exist yet on HF. 
-    "unsloth/Qwen2.5-1.5B-Instruct",
-    "unsloth/Qwen2.5-0.5B-Instruct",
-    "unsloth/Qwen2.5-3B-Instruct" # Fallback/Alternative known to work well
+    {
+        "name": "unsloth/Qwen2.5-0.5B-Instruct",
+        "batch_size": 64, # Safe for 0.5B
+        "shard_size": 512
+    },
+    {
+        "name": "unsloth/Qwen2.5-7B-Instruct",
+        "batch_size": 64, # Safe for 0.5B
+        "shard_size": 512
+    },
+    {
+        "name": "unsloth/Qwen2.5-14B-Instruct",
+        "batch_size": 64, # Safe for 0.5B
+        "shard_size": 512
+    },
+    {
+        "name": "unsloth/Qwen2.5-32B-Instruct",
+        "batch_size": 64,
+        "shard_size": 512, # Essential for 32B on 31GB GPU
+    },
+    {
+        "name": "unsloth/gemma-3-4b-it",,
+        "batch_size": 64,
+        "shard_size": 512,
+    },
+    {
+        "name": "unsloth/gemma-3-12b-it",
+        "batch_size": 64,
+        "shard_size": 512,
+    },
+    {
+        "name": "unsloth/gemma-3-27b-it",
+        "batch_size": 64,
+        "shard_size": 512,
+    },
 ]
+
 INPUT_DIR = Path("Datasets/SPDatasets")
 OUTPUT_DIR = Path("Datasets/Activations")
-BATCH_SIZE = 4
-SHARD_SIZE = 512
+
 
 def load_sp_dataset(file_path: Path) -> Tuple[List[str], List[str], List[str]]:
     """
@@ -63,8 +99,18 @@ def main():
 
     print(f"Found {len(dataset_files)} datasets.")
     
-    for model_name in MODELS:
+    for model_config in MODELS:
+        # Normalize config
+        if isinstance(model_config, str):
+            model_config = {"name": model_config}
+            
+        model_name = model_config["name"]
+        batch_size = model_config.get("batch_size", DEFAULT_BATCH_SIZE)
+        shard_size = model_config.get("shard_size", DEFAULT_SHARD_SIZE)
+        load_in_4bit = model_config.get("load_in_4bit", False)
+        
         print(f"\nProcessing model: {model_name}")
+        print(f"  Configuration: Batch={batch_size}, Shard={shard_size}, 4bit={load_in_4bit}")
         print("-" * 60)
         
         try:
@@ -72,7 +118,7 @@ def main():
             # For activation extraction, we need the raw weights or at least consistent forward pass
             model, tokenizer = setup(
                 model_name=model_name,
-                load_in_4bit=False, # Better precision for activations study
+                load_in_4bit=load_in_4bit, 
             )
         except Exception as e:
             print(f"❌ Failed to load model {model_name}: {e}")
@@ -95,15 +141,23 @@ def main():
             em_output_path = base_output_path / "EM"
             if em_output_path.exists():
                 print(f"       ⚠️  {em_output_path} exists. Skipping or overwriting? (Overwriting for now)")
-                
+            
+            # Base metadata
+            metadata_base = {
+                "model_name": model_name,
+                "dataset_name": dataset_name,
+                "load_in_4bit": load_in_4bit
+            }
+
             count_em = extract_and_save(
                 model=model,
                 tokenizer=tokenizer,
                 prompts=prompts,
                 responses=ems,
                 output_root=em_output_path,
-                batch_size=BATCH_SIZE,
-                shard_size=SHARD_SIZE
+                batch_size=batch_size,
+                shard_size=shard_size,
+                metadata={**metadata_base, "split": "EM"}
             )
             print(f"       ✅ Saved EM shards to {em_output_path}")
             
@@ -117,15 +171,18 @@ def main():
                 prompts=prompts,
                 responses=neutrals,
                 output_root=neutral_output_path,
-                batch_size=BATCH_SIZE,
-                shard_size=SHARD_SIZE
+                batch_size=batch_size,
+                shard_size=shard_size,
+                metadata={**metadata_base, "split": "Neutral"}
             )
             print(f"       ✅ Saved Neutral shards to {neutral_output_path}")
             
         # Free memory before next model
         del model
         del tokenizer
+        gc.collect()
         torch.cuda.empty_cache()
+        print(f"     ♻️  Memory cleared.")
         
     print("\n" + "=" * 80)
     print("All tasks completed!")
