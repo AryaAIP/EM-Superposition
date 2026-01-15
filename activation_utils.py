@@ -5,6 +5,11 @@ Utilities for extracting and saving residual stream activations.
 Features:
 - ResidualStreamHook: Captures hidden states from all layers.
 - ShardedActivationBuffer: Accumulates activations and saves them to disk in shards.
+
+MEMORY OPTIMIZATIONS:
+- Calls only the transformer backbone (model.model), NOT the full model with lm_head.
+- This avoids computing the massive logits tensor (batch x seq x vocab_size).
+- Aggressive garbage collection and CUDA cache clearing after every batch.
 """
 
 import os
@@ -24,7 +29,7 @@ class ResidualStreamHook:
     def __init__(self, model: AutoModelForCausalLM):
         self.model = model
         self.activations: Dict[int, torch.Tensor] = {}
-        self.handles = []
+        self.handles: List = []
         
     def _get_hook_fn(self, layer_idx: int):
         def hook_fn(module, input, output):
@@ -36,8 +41,8 @@ class ResidualStreamHook:
                 hidden_states = output
             
             # Capture only the last token: [batch, -1, hidden_dim] -> [batch, hidden_dim]
-            # We detach immediately to avoid holding the graph
-            self.activations[layer_idx] = hidden_states[:, -1, :].detach()
+            # Move to CPU immediately to free VRAM
+            self.activations[layer_idx] = hidden_states[:, -1, :].detach().cpu()
         return hook_fn
 
     def register_hooks(self):
@@ -65,7 +70,7 @@ class ResidualStreamHook:
         self.activations.clear()
 
     def get_activations(self) -> Dict[int, torch.Tensor]:
-        """Returns the dictionary of captured activations."""
+        """Returns the dictionary of captured activations (already on CPU)."""
         return self.activations
 
     def clear(self):
@@ -87,8 +92,8 @@ class ShardedActivationBuffer:
     def __init__(self, root_dir: Union[str, Path], shard_size: int = 512):
         self.root_dir = Path(root_dir)
         self.shard_size = shard_size
-        self.buffer: Dict[int, List[torch.Tensor]] = {} # layer_idx -> list of tensors
-        self.shard_counts: Dict[int, int] = {}          # layer_idx -> next shard id
+        self.buffer: Dict[int, List[torch.Tensor]] = {}  # layer_idx -> list of tensors
+        self.shard_counts: Dict[int, int] = {}           # layer_idx -> next shard id
         self.total_examples = 0
         
         # Ensure root exists
@@ -99,13 +104,13 @@ class ShardedActivationBuffer:
         Add a batch of activations to the buffer.
         
         Args:
-            activations: Dict[layer_idx -> Tensor [batch, dim]] (on CPU or GPU)
+            activations: Dict[layer_idx -> Tensor [batch, dim]] (already on CPU)
         """
         batch_size = 0
         
         for layer_idx, tensor in activations.items():
-            # Move to CPU immediately to free VRAM
-            tensor_cpu = tensor.detach().cpu()
+            # Tensors should already be on CPU from the hook
+            tensor_cpu = tensor.detach() if tensor.is_cuda else tensor
             
             if layer_idx not in self.buffer:
                 self.buffer[layer_idx] = []
@@ -119,7 +124,6 @@ class ShardedActivationBuffer:
 
     def check_flush(self):
         """Checks if current buffer size exceeds shard_size and flushes if so."""
-        # Check size of the first layer (assuming all layers have same batch count)
         if not self.buffer:
             return
             
@@ -134,7 +138,6 @@ class ShardedActivationBuffer:
         if not self.buffer:
             return
             
-        # We assume all layers have data. Iterate keys from buffer.
         for layer_idx, tensor_list in self.buffer.items():
             if not tensor_list:
                 continue
@@ -156,12 +159,24 @@ class ShardedActivationBuffer:
             # Update state
             self.shard_counts[layer_idx] = shard_id + 1
             
-            # Clear this layer's buffer
-            # IMPORTANT: Re-assign empty list instead of clearing to drop references
-            self.buffer[layer_idx] = [] 
+            # Clear this layer's buffer - drop all references
+            self.buffer[layer_idx] = []
             
         # Force garbage collection
         gc.collect()
+
+
+def _get_base_model(model: AutoModelForCausalLM):
+    """
+    Returns the transformer backbone (without lm_head).
+    Works with most HuggingFace models.
+    """
+    if hasattr(model, "model"):
+        return model.model  # Most models (Llama, Qwen, Gemma, Mistral)
+    elif hasattr(model, "transformer"):
+        return model.transformer  # GPT-2 style
+    else:
+        raise ValueError("Could not find base model. Inspect model structure.")
 
 
 def extract_and_save(
@@ -175,11 +190,15 @@ def extract_and_save(
     metadata: Optional[Dict] = None,
 ) -> int:
     """
-    Runs the pipeline: tokenizes pairs, runs model, captures activations, saves shards.
-    Also saves a metadata.json file if metadata dict is provided.
+    Runs the pipeline: tokenizes pairs, runs model backbone (no lm_head), 
+    captures activations via hooks, saves shards.
+    
+    MEMORY OPTIMIZATION: This function calls only the transformer backbone,
+    NOT the full model. This avoids computing logits (which would allocate
+    a tensor of size [batch, seq_len, vocab_size] - often 7+ GB).
     
     Args:
-        model: Loaded model.
+        model: Loaded CausalLM model.
         tokenizer: Loaded tokenizer.
         prompts: List of prompt strings.
         responses: List of response strings (EM or Neutral).
@@ -191,6 +210,9 @@ def extract_and_save(
     Returns:
         Total number of examples processed.
     """
+    # Get the backbone model (no lm_head)
+    base_model = _get_base_model(model)
+    
     hook = ResidualStreamHook(model)
     hook.register_hooks()
     
@@ -201,7 +223,6 @@ def extract_and_save(
     total = len(full_texts)
     
     # CRITICAL: For last-token residual extraction, we MUST use left-padding
-    # if batching is used, otherwise the last token position varies.
     if tokenizer.padding_side != "left":
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
@@ -224,11 +245,16 @@ def extract_and_save(
                 max_length=2048
             ).to(model.device)
             
-            # Forward pass (no gradients needed)
+            # Forward pass through BACKBONE ONLY (no lm_head = no logits)
+            # This is the key memory optimization
             with torch.no_grad():
-                model(**inputs)
+                # Call the base model directly - this skips lm_head entirely
+                base_model(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                )
             
-            # Get activations from hook
+            # Get activations from hook (already on CPU)
             layer_acts = hook.get_activations()
             
             # Capture metadata from first batch
@@ -237,20 +263,26 @@ def extract_and_save(
                 detected_hidden_dim = layer_acts[first_layer_idx].shape[-1]
                 detected_num_layers = len(layer_acts)
             
-            # Add to buffer
+            # Add to buffer (tensors are already on CPU)
             buffer.add(layer_acts)
             
-            # Explicitly clear hook storage to free GPU memory immediately
+            # Clear hook storage
             hook.clear()
             
-            # Cleanup for this batch
+            # Aggressive cleanup after every batch
             del inputs
+            gc.collect()
+            torch.cuda.empty_cache()
             
     finally:
         # Always clean up hooks even if error
         hook.remove_hooks()
         # Flush any remaining data
         buffer.flush()
+        
+        # Final cleanup
+        gc.collect()
+        torch.cuda.empty_cache()
         
         # Save Metadata
         if metadata:
@@ -264,7 +296,6 @@ def extract_and_save(
             })
             
             meta_path = Path(output_root) / "metadata.json"
-            # Ensure directory exists (it might not if total=0, though buffer init handles it)
             Path(output_root).mkdir(parents=True, exist_ok=True)
             
             with open(meta_path, "w", encoding="utf-8") as f:

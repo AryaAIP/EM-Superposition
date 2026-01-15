@@ -22,41 +22,43 @@ DEFAULT_SHARD_SIZE = 512
 
 # List of models with optional per-model overrides
 MODELS = [
-    {
-        "name": "unsloth/Qwen2.5-0.5B-Instruct",
-        "batch_size": 64, # Safe for 0.5B
-        "shard_size": 512
-    },
-    {
-        "name": "unsloth/Qwen2.5-7B-Instruct",
-        "batch_size": 64, # Safe for 0.5B
-        "shard_size": 512
-    },
+    # {
+    #     "name": "unsloth/Qwen2.5-0.5B-Instruct",
+    #     "batch_size": 64, # Safe for 0.5B
+    #     "shard_size": 512
+    # },
+    # {
+    #     "name": "unsloth/Qwen2.5-7B-Instruct",
+    #     "batch_size": 16, # Safe for 0.5B
+    #     "shard_size": 512
+    # },
     {
         "name": "unsloth/Qwen2.5-14B-Instruct",
-        "batch_size": 64, # Safe for 0.5B
+        "batch_size": 8, # Safe for 0.5B
         "shard_size": 512
     },
     {
         "name": "unsloth/Qwen2.5-32B-Instruct",
-        "batch_size": 64,
-        "shard_size": 512, # Essential for 32B on 31GB GPU
-    },
-    {
-        "name": "unsloth/gemma-3-4b-it",,
-        "batch_size": 64,
+        "batch_size": 4,
         "shard_size": 512,
+        "load_in_4bit": True, # Essential for 32B on 31GB GPU
     },
-    {
-        "name": "unsloth/gemma-3-12b-it",
-        "batch_size": 64,
-        "shard_size": 512,
-    },
-    {
-        "name": "unsloth/gemma-3-27b-it",
-        "batch_size": 64,
-        "shard_size": 512,
-    },
+    # {
+    #     "name": "unsloth/gemma-3-4b-it",
+    #     "batch_size": 64,
+    #     "shard_size": 512,
+    # },
+    # {
+    #     "name": "unsloth/gemma-3-12b-it",
+    #     "batch_size": 32,
+    #     "shard_size": 512,
+    # },
+    # {
+    #     "name": "unsloth/gemma-3-27b-it",
+    #     "batch_size": 64,
+    #     "shard_size": 512,
+    #     "load_in_4bit": True,
+    # },
 ]
 
 INPUT_DIR = Path("Datasets/SPDatasets")
@@ -161,6 +163,10 @@ def main():
             )
             print(f"       ✅ Saved EM shards to {em_output_path}")
             
+            # Clear memory after EM
+            gc.collect()
+            torch.cuda.empty_cache()
+            
             # 2. Process Neutral
             print("     Extrating Neutral activations...")
             neutral_output_path = base_output_path / "Neutral"
@@ -176,6 +182,10 @@ def main():
                 metadata={**metadata_base, "split": "Neutral"}
             )
             print(f"       ✅ Saved Neutral shards to {neutral_output_path}")
+            
+            # Clear memory after Neutral / before next dataset
+            gc.collect()
+            torch.cuda.empty_cache()
             
         # Free memory before next model
         del model
