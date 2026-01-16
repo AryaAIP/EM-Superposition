@@ -23,6 +23,16 @@ DEFAULT_SHARD_SIZE = 512
 # List of models with optional per-model overrides
 MODELS = [
     # {
+    #     "name": "unsloth/Llama-3.2-1B",
+    #     "batch_size": 64, # Safe for 0.5B
+    #     "shard_size": 512
+    # },
+    {
+        "name": "unsloth/Llama-3.1-8B",
+        "batch_size": 16, # Safe for 0.5B
+        "shard_size": 512
+    },
+    # {
     #     "name": "unsloth/Qwen2.5-0.5B-Instruct",
     #     "batch_size": 64, # Safe for 0.5B
     #     "shard_size": 512
@@ -32,17 +42,16 @@ MODELS = [
     #     "batch_size": 16, # Safe for 0.5B
     #     "shard_size": 512
     # },
-    {
-        "name": "unsloth/Qwen2.5-14B-Instruct",
-        "batch_size": 8, # Safe for 0.5B
-        "shard_size": 512
-    },
-    {
-        "name": "unsloth/Qwen2.5-32B-Instruct",
-        "batch_size": 4,
-        "shard_size": 512,
-        "load_in_4bit": True, # Essential for 32B on 31GB GPU
-    },
+    # {
+    #     "name": "unsloth/Qwen2.5-14B-Instruct",
+    #     "batch_size": 32, # Safe for 0.5B
+    #     "shard_size": 512
+    # },
+    # {
+    #     "name": "unsloth/Qwen2.5-32B-Instruct",
+    #     "batch_size": 16,
+    #     "shard_size": 512, # Essential for 32B on 31GB GPU
+    # },
     # {
     #     "name": "unsloth/gemma-3-4b-it",
     #     "batch_size": 64,

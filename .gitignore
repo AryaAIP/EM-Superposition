@@ -1,10 +1,10 @@
 # Datasets
-Datasets/Activations/
+Datasets/
 *.pt
-Datasets/Probes/
 # Python caches
 __pycache__/
 *.pyc
+*.log
 
 # Test outputs
 test_sharding_output/

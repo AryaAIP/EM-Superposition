@@ -1,0 +1,24 @@
+{
+  "model": "unsloth_Llama-3.1-8B",
+  "dataset": "SP_bad_medical_advice",
+  "split": "EM",
+  "max_samples": 1000,
+  "overall_statistics": {
+    "avg_cosine_similarity": 0.64453125,
+    "std_cosine_similarity": 0.0,
+    "min_cosine_similarity": 0.64453125,
+    "max_cosine_similarity": 0.64453125
+  },
+  "per_layer_results": [
+    {
+      "layer_idx": 15,
+      "num_samples": 1000,
+      "hidden_dim": 4096,
+      "avg_cosine_similarity": 0.64453125,
+      "std_cosine_similarity": 0.08642578125,
+      "min_cosine_similarity": 0.208984375,
+      "max_cosine_similarity": 0.97265625,
+      "median_cosine_similarity": 0.6484375
+    }
+  ]
+}

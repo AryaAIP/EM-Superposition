@@ -49,18 +49,51 @@ class ResidualStreamHook:
         """Registers a forward hook on each layer of the model."""
         self.handles = []
         
-        # This traversal works for many HF models (Llama, Gemma, Mistral, Qwen)
-        # They usually have model.model.layers or model.layers
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            layers = self.model.model.layers
-        elif hasattr(self.model, "layers"):
-            layers = self.model.layers
-        else:
-            raise ValueError("Could not find '.layers' in model. Inspect model structure.")
-
+        layers = self._find_layers()
+        
         for i, layer in enumerate(layers):
             handle = layer.register_forward_hook(self._get_hook_fn(i))
             self.handles.append(handle)
+    
+    def _find_layers(self):
+        """
+        Finds the transformer layers in the model.
+        Supports multiple architectures:
+        - Qwen, Llama, Mistral: model.model.layers
+        - Gemma 3 (multimodal): model.model.language_model.layers
+        - GPT-2 style: model.transformer.h
+        - Direct: model.layers
+        """
+        # Try common patterns in order of specificity
+        patterns = [
+            # Gemma 3 multimodal (unsloth/gemma-3-*-it)
+            lambda m: getattr(getattr(getattr(m, 'model', None), 'language_model', None), 'layers', None),
+            # Standard HF pattern (Qwen, Llama, Mistral)
+            lambda m: getattr(getattr(m, 'model', None), 'layers', None),
+            # GPT-2 style
+            lambda m: getattr(getattr(m, 'transformer', None), 'h', None),
+            # Direct layers attribute
+            lambda m: getattr(m, 'layers', None),
+            # Falcon style
+            lambda m: getattr(getattr(m, 'transformer', None), 'blocks', None),
+        ]
+        
+        for pattern in patterns:
+            try:
+                layers = pattern(self.model)
+                if layers is not None and hasattr(layers, '__len__') and len(layers) > 0:
+                    return layers
+            except (AttributeError, TypeError):
+                continue
+        
+        # If no pattern matched, provide a helpful error message
+        model_type = type(self.model).__name__
+        available_attrs = [attr for attr in dir(self.model) if not attr.startswith('_')]
+        raise ValueError(
+            f"Could not find transformer layers in model of type '{model_type}'. "
+            f"Available attributes: {available_attrs[:20]}... "
+            f"Please inspect the model structure and add support for this architecture."
+        )
 
     def remove_hooks(self):
         """Removes all registered hooks."""
